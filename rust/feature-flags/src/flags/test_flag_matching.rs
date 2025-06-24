@@ -282,11 +282,11 @@ mod tests {
         );
     }
 
-    pub fn create_test_flag_with_property(
+    pub fn create_test_flag_with_properties(
         id: i32,
         team_id: TeamId,
         key: &str,
-        filter: PropertyFilter,
+        filters: Vec<PropertyFilter>,
     ) -> FeatureFlag {
         create_test_flag(
             Some(id),
@@ -295,7 +295,7 @@ mod tests {
             Some(key.to_string()),
             Some(FlagFilters {
                 groups: vec![FlagPropertyGroup {
-                    properties: Some(vec![filter]),
+                    properties: Some(filters),
                     rollout_percentage: Some(100.0),
                     variant: None,
                 }],
@@ -309,6 +309,15 @@ mod tests {
             None,
             None,
         )
+    }
+
+    pub fn create_test_flag_with_property(
+        id: i32,
+        team_id: TeamId,
+        key: &str,
+        filter: PropertyFilter,
+    ) -> FeatureFlag {
+        create_test_flag_with_properties(id, team_id, key, vec![filter])
     }
 
     pub fn create_test_flag_that_depends_on_flag(
@@ -604,6 +613,125 @@ mod tests {
                 result.flags.get("parent_flag").unwrap().to_value(),
                 FlagValue::Boolean(false)
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_flags_with_deep_dependency_tree_only_calls_db_once_per_level() {
+        let reader = setup_pg_reader_client(None).await;
+        let writer = setup_pg_writer_client(None).await;
+        let cohort_cache = Arc::new(CohortCacheManager::new(reader.clone(), None, None));
+        let team = insert_new_team_in_pg(reader.clone(), None).await.unwrap();
+        let _person_id = insert_person_for_team_in_pg(
+            reader.clone(),
+            team.id,
+            "test_user_distinct_id".to_string(),
+            Some(json!({ "email": "email-in-db@example.com", "is-cool": true })),
+        )
+        .await
+        .unwrap();
+
+        let leaf_flag = create_test_flag_with_property(
+            23,
+            team.id,
+            "leaf_flag",
+            PropertyFilter {
+                key: "is-cool".to_string(),
+                value: Some(json!(true)),
+                operator: Some(OperatorType::Exact),
+                prop_type: PropertyType::Person,
+                group_type_index: None,
+                negation: None,
+            },
+        );
+        let independent_flag = create_test_flag_with_property(
+            99,
+            team.id,
+            "independent_flag",
+            PropertyFilter {
+                key: "email".to_string(),
+                value: Some(json!("email-not-in-db@example.com")),
+                operator: Some(OperatorType::Exact),
+                prop_type: PropertyType::Person,
+                group_type_index: None,
+                negation: None,
+            },
+        );
+        let intermediate_flag = create_test_flag_with_properties(
+            43,
+            team.id,
+            "intermediate_flag",
+            vec![
+                PropertyFilter {
+                    key: "email".to_string(),
+                    value: Some(json!("email-in-db@example.com")),
+                    operator: Some(OperatorType::Exact),
+                    prop_type: PropertyType::Person,
+                    group_type_index: None,
+                    negation: None,
+                },
+                PropertyFilter {
+                    key: leaf_flag.id.to_string(),
+                    value: Some(json!(true)),
+                    operator: Some(OperatorType::Exact),
+                    prop_type: PropertyType::Flag,
+                    group_type_index: None,
+                    negation: None,
+                },
+            ],
+        );
+        let parent_flag = create_test_flag_that_depends_on_flag(
+            42,
+            team.id,
+            "parent_flag",
+            intermediate_flag.id,
+            FlagValue::Boolean(true),
+        );
+
+        let mut matcher = FeatureFlagMatcher::new(
+            "test_user_distinct_id".to_string(),
+            team.id,
+            team.project_id,
+            reader,
+            writer,
+            cohort_cache,
+            None,
+            None,
+        );
+
+        let flags = FeatureFlagList {
+            flags: vec![
+                independent_flag.clone(),
+                leaf_flag.clone(),
+                intermediate_flag.clone(),
+                parent_flag.clone(),
+            ],
+        };
+
+        // parent -> intermediate -> leaf
+        // intermediate
+
+        {
+            let result = matcher
+                .evaluate_all_feature_flags(flags.clone(), None, None, None, Uuid::new_v4())
+                .await;
+            assert_eq!(
+                result.flags.get("leaf_flag").unwrap().to_value(),
+                FlagValue::Boolean(true)
+            );
+            assert_eq!(
+                result.flags.get("independent_flag").unwrap().to_value(),
+                FlagValue::Boolean(false)
+            );
+            assert_eq!(
+                result.flags.get("intermediate_flag").unwrap().to_value(),
+                FlagValue::Boolean(true)
+            );
+            assert_eq!(
+                result.flags.get("parent_flag").unwrap().to_value(),
+                FlagValue::Boolean(true)
+            );
+            assert!(!result.errors_while_computing_flags);
         }
     }
 
