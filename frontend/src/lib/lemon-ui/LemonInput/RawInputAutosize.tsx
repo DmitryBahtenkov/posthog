@@ -61,13 +61,10 @@ export const RawInputAutosize = React.forwardRef<HTMLInputElement, RawInputAutos
                 }}
                 {...inputProps}
             />
-            <div ref={sizerRef} className="absolute top-0 left-0 h-0 overflow-scroll whitespace-pre invisible">
+            <div ref={sizerRef} className="absolute top-0 left-0 h-0 overflow-auto whitespace-pre invisible">
                 {inputProps.value}
             </div>
-            <div
-                ref={placeHolderSizerRef}
-                className="absolute top-0 left-0 h-0 overflow-scroll whitespace-pre invisible"
-            >
+            <div ref={placeHolderSizerRef} className="absolute top-0 left-0 h-0 overflow-auto whitespace-pre invisible">
                 {inputProps.placeholder}
             </div>
         </div>
