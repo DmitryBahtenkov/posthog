@@ -30,6 +30,7 @@ from posthog.temporal.common.base import PostHogWorkflow
 from posthog.temporal.common.clickhouse import get_client
 from posthog.temporal.common.heartbeat import Heartbeater
 from posthog.temporal.common.logger import FilteringBoundLogger, bind_temporal_worker_logger
+from posthog.temporal.common.shutdown import ShutdownMonitor
 from posthog.temporal.data_imports.pipelines.pipeline.utils import table_from_py_list
 from posthog.temporal.data_imports.util import prepare_s3_files_for_querying
 from posthog.temporal.data_modeling.metrics import get_data_modeling_finished_metric
@@ -181,14 +182,18 @@ async def run_dag_activity(inputs: RunDagActivityInputs) -> Results:
 
     running_tasks = set()
 
-    async with Heartbeater():
+    async with Heartbeater(), ShutdownMonitor() as shutdown_monitor:
         while True:
             message = await queue.get()
+            shutdown_monitor.raise_if_is_worker_shutdown()
+
             match message:
                 case QueueMessage(status=ModelStatus.READY, label=label):
                     await logger.adebug(f"Handling queue message READY. label={label}")
                     model = inputs.dag[label]
-                    task = asyncio.create_task(handle_model_ready(model, inputs.team_id, queue, inputs.job_id, logger))
+                    task = asyncio.create_task(
+                        handle_model_ready(model, inputs.team_id, queue, inputs.job_id, logger, shutdown_monitor)
+                    )
                     running_tasks.add(task)
                     task.add_done_callback(running_tasks.discard)
 
@@ -270,7 +275,12 @@ class CannotCoerceColumnException(Exception):
 
 
 async def handle_model_ready(
-    model: ModelNode, team_id: int, queue: asyncio.Queue[QueueMessage], job_id: str, logger: FilteringBoundLogger
+    model: ModelNode,
+    team_id: int,
+    queue: asyncio.Queue[QueueMessage],
+    job_id: str,
+    logger: FilteringBoundLogger,
+    shutdown_monitor: ShutdownMonitor,
 ) -> None:
     """Handle a model that is ready to run by materializing.
 
@@ -290,7 +300,7 @@ async def handle_model_ready(
             saved_query = await get_saved_query(team, model.label)
             job = await database_sync_to_async(DataModelingJob.objects.get)(id=job_id)
 
-            await materialize_model(model.label, team, saved_query, job, logger)
+            await materialize_model(model.label, team, saved_query, job, logger, shutdown_monitor)
     except CHQueryErrorMemoryLimitExceeded as err:
         await logger.aexception("Memory limit exceeded for model %s", model.label, job_id=job_id)
         await handle_error(job, model, queue, err, "Memory limit exceeded for model %s: %s", logger)
@@ -384,6 +394,7 @@ async def materialize_model(
     saved_query: DataWarehouseSavedQuery,
     job: DataModelingJob,
     logger: FilteringBoundLogger,
+    shutdown_monitor: ShutdownMonitor,
 ) -> tuple[str, DeltaTable, uuid.UUID]:
     """Materialize a given model by running its query and piping the results into a delta table.
 
@@ -420,7 +431,16 @@ async def materialize_model(
         except FileNotFoundError:
             await logger.adebug(f"Table at {table_uri} not found - skipping deletion")
 
+        delta_table: deltalake.DeltaTable | None = None
+
         async for index, batch in asyncstdlib.enumerate(hogql_table(hogql_query, team, logger)):
+            if delta_table is None:
+                delta_table = deltalake.DeltaTable.create(
+                    table_uri=table_uri,
+                    schema=batch.schema,
+                    storage_options=storage_options,
+                )
+
             mode: typing.Literal["error", "append", "overwrite", "ignore"] = "append"
             schema_mode: typing.Literal["merge", "overwrite"] | None = "merge"
             if index == 0:
@@ -432,13 +452,22 @@ async def materialize_model(
             )
 
             deltalake.write_deltalake(
-                table_or_uri=table_uri, storage_options=storage_options, data=batch, mode=mode, schema_mode=schema_mode
+                table_or_uri=delta_table,
+                storage_options=storage_options,
+                data=batch,
+                mode=mode,
+                schema_mode=schema_mode,
+                engine="rust",
             )
 
             row_count = row_count + batch.num_rows
 
+            shutdown_monitor.raise_if_is_worker_shutdown()
+
         await logger.adebug(f"Finished writing to delta table. row_count={row_count}")
-        delta_table = deltalake.DeltaTable(table_uri=table_uri, storage_options=storage_options)
+
+        if delta_table is None:
+            delta_table = deltalake.DeltaTable(table_uri=table_uri, storage_options=storage_options)
     except Exception as e:
         error_message = str(e)
         if "Query exceeds memory limits" in error_message:
@@ -455,6 +484,22 @@ async def materialize_model(
             await mark_job_as_failed(job, error_message, logger)
 
             raise CannotCoerceColumnException(f"Type coercion error in model {model_label}: {error_message}") from e
+
+        elif "Invalid data type for Delta Lake" in error_message:
+            saved_query.latest_error = error_message
+            await database_sync_to_async(saved_query.save)()
+            await mark_job_as_failed(job, error_message, logger)
+
+            raise CannotCoerceColumnException(
+                f"Data type not supported in model {model_label}: {error_message}. This is likely due to decimal precision."
+            ) from e
+        elif "Unknown table" in error_message:
+            error_message = f"Table reference no longer exists for model"
+            saved_query.latest_error = error_message
+            await logger.ainfo("Table reference no longer exists for model %s, reverting materialization", model_label)
+            await revert_materialization(saved_query, logger)
+            await mark_job_as_failed(job, error_message, logger)
+            raise Exception(f"Table reference missing for model {model_label}: {error_message}") from e
         else:
             saved_query.latest_error = f"Failed to materialize model {model_label}"
             error_message = "Your query failed to materialize. If this query ran for a long time, try optimizing it."
@@ -500,6 +545,26 @@ async def mark_job_as_failed(job: DataModelingJob, error_message: str, logger: F
     job.status = DataModelingJob.Status.FAILED
     job.error = error_message
     await database_sync_to_async(job.save)()
+
+
+async def revert_materialization(saved_query: DataWarehouseSavedQuery, logger: FilteringBoundLogger) -> None:
+    """
+    This stops the temporal workflow for a materialization view. Expected to be used in the case of an
+    unrecoverable error, like a table reference no longer existing.
+    """
+    try:
+        from posthog.warehouse.data_load.saved_query_service import delete_saved_query_schedule
+
+        await database_sync_to_async(delete_saved_query_schedule)(str(saved_query.id))
+
+        saved_query.sync_frequency_interval = None
+        saved_query.status = None
+        await database_sync_to_async(saved_query.save)()
+
+        await logger.ainfo("Successfully reverted materialization for saved query %s", saved_query.name)
+
+    except Exception as e:
+        await logger.aexception("Failed to revert materialization for saved query %s: %s", saved_query.name, str(e))
 
 
 async def update_table_row_count(
