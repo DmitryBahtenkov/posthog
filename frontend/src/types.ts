@@ -24,6 +24,7 @@ import {
 import { Dayjs, dayjs } from 'lib/dayjs'
 import { PopoverProps } from 'lib/lemon-ui/Popover/Popover'
 import type { PostHog, SupportedWebVitalsMetrics } from 'posthog-js'
+import { HogFlow } from 'products/messaging/frontend/Campaigns/hogflows/types'
 import { Layout } from 'react-grid-layout'
 import { BehavioralFilterKey, BehavioralFilterType } from 'scenes/cohorts/CohortFilters/types'
 import { BreakdownColorConfig } from 'scenes/dashboard/DashboardInsightColorsModal'
@@ -41,7 +42,6 @@ import type {
     CurrencyCode,
     DashboardFilter,
     DatabaseSchemaField,
-    ErrorTrackingIssueAssignee,
     ExperimentExposureCriteria,
     ExperimentFunnelsQuery,
     ExperimentMetric,
@@ -372,6 +372,7 @@ export interface HedgehogConfig extends MinimalHedgehogConfig {
     interactions_enabled: boolean
     controls_enabled: boolean
     party_mode_enabled: boolean
+    fixed_direction?: 'left' | 'right'
 }
 
 export interface NotificationSettings {
@@ -750,7 +751,7 @@ export interface ToolbarProps extends ToolbarParams {
 
 export type PathCleaningFilter = { alias?: string; regex?: string }
 
-export type PropertyFilterBaseValue = string | number | bigint | ErrorTrackingIssueAssignee
+export type PropertyFilterBaseValue = string | number | bigint
 export type PropertyFilterValue = PropertyFilterBaseValue | PropertyFilterBaseValue[] | null
 
 /** Sync with plugin-server/src/types.ts */
@@ -1147,7 +1148,6 @@ export enum SessionRecordingSidebarTab {
     OVERVIEW = 'overview',
     SESSION_SUMMARY = 'ai-summary',
     INSPECTOR = 'inspector',
-    DEBUGGER = 'debugger',
     NETWORK_WATERFALL = 'network-waterfall',
 }
 
@@ -1779,6 +1779,7 @@ export type BillingFeatureType = {
     key: AvailableFeatureUnion
     name: string
     description?: string | null
+    category?: string | null
     docsUrl?: string | null
     limit?: number | null
     note?: string | null
@@ -2061,6 +2062,11 @@ export interface DashboardBasicType extends WithAccessControl {
     tags?: string[]
     /** Purely local value to determine whether the dashboard should be highlighted, e.g. as a fresh duplicate. */
     _highlight?: boolean
+    /**
+     * The last time the dashboard was refreshed.
+     * Used to block the dashboard refresh button.
+     */
+    last_refresh?: string | null
 }
 
 export interface DashboardTemplateListParams {
@@ -3058,6 +3064,7 @@ export interface Survey {
     response_sampling_limit?: number | null
     response_sampling_daily_limits?: string[] | null
     enable_partial_responses?: boolean | null
+    is_publicly_shareable?: boolean | null
     _create_in_folder?: string | null
 }
 
@@ -3225,6 +3232,7 @@ export interface FeatureFlagGroupType {
     rollout_percentage?: number | null
     variant?: string | null
     users_affected?: number
+    sort_key?: string | null // Client-side only stable id for sorting.
 }
 
 export interface MultivariateFlagVariant {
@@ -4286,6 +4294,20 @@ export type APIScopeObject =
     | 'warehouse_view'
     | 'warehouse_table'
 
+export type APIScopeAction = 'read' | 'write'
+
+export type APIScope = {
+    key: APIScopeObject
+    objectPlural: string
+    info?: string | JSX.Element
+    disabledActions?: APIScopeAction[]
+    disabledWhenProjectScoped?: boolean
+    description?: string
+    warnings?: Partial<Record<APIScopeAction, string | JSX.Element>>
+}
+
+export type APIScopePreset = { value: string; label: string; scopes: string[]; isCloudOnly?: boolean }
+
 export enum AccessControlLevel {
     None = 'none',
     Member = 'member',
@@ -4596,7 +4618,12 @@ export interface SimpleExternalDataSourceSchema {
     last_synced_at?: Dayjs
 }
 
-export type SchemaIncrementalFieldsResponse = IncrementalField[]
+export type SchemaIncrementalFieldsResponse = {
+    incremental_fields: IncrementalField[]
+    incremental_available: boolean
+    append_available: boolean
+    full_refresh_available: boolean
+}
 
 export interface IncrementalField {
     label: string
@@ -4612,15 +4639,16 @@ export interface ExternalDataSourceSyncSchema {
     sync_time_of_day: string | null
     incremental_field: string | null
     incremental_field_type: string | null
-    sync_type: 'full_refresh' | 'incremental' | null
+    sync_type: 'full_refresh' | 'incremental' | 'append' | null
     incremental_fields: IncrementalField[]
     incremental_available: boolean
+    append_available: boolean
 }
 
 export interface ExternalDataSourceSchema extends SimpleExternalDataSourceSchema {
     table?: SimpleDataWarehouseTable
     incremental: boolean
-    sync_type: 'incremental' | 'full_refresh' | null
+    sync_type: 'incremental' | 'full_refresh' | 'append' | null
     sync_time_of_day: string | null
     status?: ExternalDataSchemaStatus
     latest_error: string | null
@@ -5114,7 +5142,7 @@ export type OnboardingProduct = {
     scene: Scene
 }
 
-export type HogFunctionInputSchemaType = {
+export type CyclotronJobInputSchemaType = {
     type:
         | 'string'
         | 'number'
@@ -5141,14 +5169,14 @@ export type HogFunctionInputSchemaType = {
     requiredScopes?: string
 }
 
-export type HogFunctionInputType = {
+export type CyclotronJobInputType = {
     value: any
     templating?: 'hog' | 'liquid'
     secret?: boolean
     bytecode?: any
 }
 
-export type HogFunctionMasking = {
+export type CyclotronJobMasking = {
     ttl: number | null
     threshold?: number | null
     hash: string
@@ -5156,22 +5184,22 @@ export type HogFunctionMasking = {
 }
 
 // subset of EntityFilter
-export interface HogFunctionFilterBase {
+export interface CyclotronJobFilterBase {
     id: string
     name?: string | null
     order?: number
     properties?: (EventPropertyFilter | PersonPropertyFilter | ElementPropertyFilter)[]
 }
 
-export interface HogFunctionFilterEvents extends HogFunctionFilterBase {
+export interface CyclotronJobFilterEvents extends CyclotronJobFilterBase {
     type: 'events'
 }
 
-export interface HogFunctionFilterActions extends HogFunctionFilterBase {
+export interface CyclotronJobFilterActions extends CyclotronJobFilterBase {
     type: 'actions'
 }
 
-export type HogFunctionFilterPropertyFilter =
+export type CyclotronJobFilterPropertyFilter =
     | EventPropertyFilter
     | PersonPropertyFilter
     | ElementPropertyFilter
@@ -5179,10 +5207,10 @@ export type HogFunctionFilterPropertyFilter =
     | FeaturePropertyFilter
     | HogQLPropertyFilter
 
-export interface HogFunctionFiltersType {
-    events?: HogFunctionFilterEvents[]
-    actions?: HogFunctionFilterActions[]
-    properties?: HogFunctionFilterPropertyFilter[]
+export interface CyclotronJobFiltersType {
+    events?: CyclotronJobFilterEvents[]
+    actions?: CyclotronJobFilterActions[]
+    properties?: CyclotronJobFilterPropertyFilter[]
     filter_test_accounts?: boolean
     bytecode?: any[]
     bytecode_error?: string
@@ -5191,9 +5219,9 @@ export interface HogFunctionFiltersType {
 export interface HogFunctionMappingType {
     name: string
     disabled?: boolean
-    inputs_schema?: HogFunctionInputSchemaType[]
-    inputs?: Record<string, HogFunctionInputType> | null
-    filters?: HogFunctionFiltersType | null
+    inputs_schema?: CyclotronJobInputSchemaType[]
+    inputs?: Record<string, CyclotronJobInputType> | null
+    filters?: CyclotronJobFiltersType | null
 }
 export interface HogFunctionMappingTemplateType extends HogFunctionMappingType {
     name: string
@@ -5208,15 +5236,10 @@ export type HogFunctionTypeType =
     | 'site_destination'
     | 'site_app'
     | 'transformation'
-    | 'broadcast'
-    | 'messaging_campaign'
-
-export type HogFunctionKind = 'messaging_campaign' | null
 
 export type HogFunctionType = {
     id: string
     type: HogFunctionTypeType
-    kind?: HogFunctionKind | null
     icon_url?: string
     name: string
     description: string
@@ -5226,11 +5249,11 @@ export type HogFunctionType = {
     enabled: boolean
     hog: string
     execution_order?: number
-    inputs_schema?: HogFunctionInputSchemaType[]
-    inputs?: Record<string, HogFunctionInputType> | null
+    inputs_schema?: CyclotronJobInputSchemaType[]
+    inputs?: Record<string, CyclotronJobInputType> | null
     mappings?: HogFunctionMappingType[] | null
-    masking?: HogFunctionMasking | null
-    filters?: HogFunctionFiltersType | null
+    masking?: CyclotronJobMasking | null
+    filters?: CyclotronJobFiltersType | null
     template?: HogFunctionTemplateType
     status?: HogFunctionStatus
 }
@@ -5255,6 +5278,8 @@ export type HogFunctionConfigurationType = Omit<
     hog?: HogFunctionType['hog'] // In the config it can be empty if using a template
     _create_in_folder?: string | null
 }
+export type HogFlowConfigurationType = Omit<HogFlow, 'id' | 'created_at' | 'created_by' | 'updated_at' | 'status'>
+export type CyclotronJobConfigurationType = HogFunctionConfigurationType | HogFlowConfigurationType
 
 export type HogFunctionSubTemplateType = Pick<
     HogFunctionType,
@@ -5269,7 +5294,7 @@ export type HogFunctionSubTemplateType = Pick<
 
 export type HogFunctionTemplateType = Pick<
     HogFunctionType,
-    'id' | 'type' | 'kind' | 'name' | 'hog' | 'inputs_schema' | 'filters' | 'icon_url' | 'masking' | 'mappings'
+    'id' | 'type' | 'name' | 'hog' | 'inputs_schema' | 'filters' | 'icon_url' | 'masking' | 'mappings'
 > & {
     status: HogFunctionTemplateStatus
     free: boolean
@@ -5300,7 +5325,7 @@ export type HogFunctionStatus = {
     tokens: number
 }
 
-export type HogFunctionInvocationGlobals = {
+export type CyclotronJobInvocationGlobals = {
     project: {
         id: number
         name: string
@@ -5343,7 +5368,11 @@ export type HogFunctionInvocationGlobals = {
     }
 }
 
-export type HogFunctionTestInvocationResult = {
+export type CyclotronJobInvocationGlobalsWithInputs = Partial<CyclotronJobInvocationGlobals> & {
+    inputs?: Record<string, any>
+}
+
+export type CyclotronJobTestInvocationResult = {
     status: 'success' | 'error' | 'skipped'
     logs: LogEntry[]
     result: any
@@ -5519,6 +5548,10 @@ export interface ProjectTreeRef {
     ref: string | null
 }
 
+export type OAuthApplicationPublicMetadata = {
+    name: string
+    client_id: string
+}
 export interface EmailSenderDomainStatus {
     status: 'pending' | 'success'
     dnsRecords: (
