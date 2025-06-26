@@ -369,18 +369,18 @@ def render_template(
 
     if settings.E2E_TESTING:
         context["e2e_testing"] = True
-        context["js_posthog_api_key"] = "phc_ex7Mnvi4DqeB6xSQoXU1UVPzAmUIpiciRKQQXGGTYQO"
-        context["js_posthog_host"] = "https://internal-t.posthog.com"
-        context["js_posthog_ui_host"] = "https://us.posthog.com"
+        context["js_posthog_api_key"] = ""
+        context["js_posthog_host"] = ""
+        context["js_posthog_ui_host"] = ""
 
     elif settings.SELF_CAPTURE:
         if posthoganalytics.api_key:
             context["js_posthog_api_key"] = posthoganalytics.api_key
             context["js_posthog_host"] = ""  # Becomes location.origin in the frontend
     else:
-        context["js_posthog_api_key"] = "sTMFPsFhdP1Ssg"
-        context["js_posthog_host"] = "https://internal-t.posthog.com"
-        context["js_posthog_ui_host"] = "https://us.posthog.com"
+        context["js_posthog_api_key"] = ""
+        context["js_posthog_host"] = ""
+        context["js_posthog_ui_host"] = ""
 
     context["js_capture_time_to_see_data"] = settings.CAPTURE_TIME_TO_SEE_DATA
     context["js_kea_verbose_logging"] = settings.KEA_VERBOSE_LOGGING

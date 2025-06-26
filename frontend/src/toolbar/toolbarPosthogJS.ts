@@ -6,7 +6,7 @@ const DEFAULT_API_KEY = 'sTMFPsFhdP1Ssg'
 
 const runningOnPosthog = !!window.POSTHOG_APP_CONTEXT
 const apiKey = runningOnPosthog ? window.JS_POSTHOG_API_KEY : DEFAULT_API_KEY
-const apiHost = runningOnPosthog ? window.JS_POSTHOG_HOST : 'https://internal-t.posthog.com'
+const apiHost = runningOnPosthog ? window.JS_POSTHOG_HOST : ''
 
 export const toolbarPosthogJS = new PostHog(apiKey || DEFAULT_API_KEY, {
     host: apiHost,
@@ -21,15 +21,5 @@ if (runningOnPosthog && window.JS_POSTHOG_SELF_CAPTURE) {
 }
 
 export const useToolbarFeatureFlag = (flag: FeatureFlagKey, match?: string): boolean => {
-    const [flagValue, setFlagValue] = useState<boolean | string | undefined>(toolbarPosthogJS.getFeatureFlag(flag))
-
-    useEffect(() => {
-        return toolbarPosthogJS.onFeatureFlag(flag, (value) => setFlagValue(value))
-    }, [flag, match])
-
-    if (match) {
-        return flagValue === match
-    }
-
-    return !!flagValue
+    return false;
 }
